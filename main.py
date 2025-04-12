@@ -1,12 +1,15 @@
+"""
+LinkedIn Bot - Refactored using Command Pattern
+"""
 import time
-import csv
+import json
 import random
 import os
 import re
-import json
-import threading
-import queue
-from typing import List, Set, Dict
+import logging
+from typing import List, Set, Dict, Tuple, Optional
+from abc import ABC, abstractmethod
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -22,31 +25,57 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 
 
+# Configuration
+class Config:
 
 
-def random_delay(min_seconds=1, max_seconds=3):
-    """Dodaje losowe opóźnienie, aby symulować ludzkiego użytkownika"""
-    delay = random.uniform(min_seconds, max_seconds)
-    time.sleep(delay)
 
-
-def wait_and_find_element(driver, by, value, timeout=15):
-    try:
-        return WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((by, value))
+# Logger setup
+class LoggerSetup:
+    @staticmethod
+    def get_logger(name):
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
         )
-    except Exception as e:
-        print(f"[ERROR] Nie znaleziono elementu {value} w czasie {timeout}s: {str(e)}")
-        return None
+        return logging.getLogger(name)
 
 
-def create_filename_from_query(query):
-    """Tworzy nazwę pliku CSV na podstawie zapytania wyszukiwania"""
-    # Zamień spacje na podkreślniki i usuń znaki niedozwolone w nazwach plików
-    clean_query = re.sub(r'[^\w\s-]', '', query.lower()).strip().replace(' ', '_')
-    return f"{clean_query}_linkedin_profiles.csv"
+# Utility functions
+class Utils:
+    @staticmethod
+    def random_delay(min_seconds=1, max_seconds=3):
+        """Adds random delay to simulate human user behavior"""
+        delay = random.uniform(min_seconds, max_seconds)
+        time.sleep(delay)
+
+    @staticmethod
+    def random_scroll(driver, min_pixels=100, max_pixels=500):
+        """Performs random scrolling on the page"""
+        height = random.randint(min_pixels, max_pixels)
+        driver.execute_script(f"window.scrollBy(0, {height});")
+        time.sleep(random.uniform(0.5, 2.0))
+
+    @staticmethod
+    def wait_and_find_element(driver, by, value, timeout=15):
+        try:
+            return WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((by, value))
+            )
+        except Exception as e:
+            logger = LoggerSetup.get_logger("Utils")
+            logger.error(f"Element {value} not found within {timeout}s: {str(e)}")
+            return None
+
+    @staticmethod
+    def create_filename_from_query(query):
+        """Creates a JSON filename based on the search query"""
+        clean_query = re.sub(r'[^\w\s-]', '', query.lower()).strip().replace(' ', '_')
+        return f"{clean_query}_linkedin_profiles.json"
 
 
+# Driver factory
 class DriverFactory:
     @staticmethod
     def create_chrome_driver():
@@ -54,207 +83,643 @@ class DriverFactory:
         options.add_argument("--start-maximized")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-blink-features")
+        options.add_argument('--disable-extensions')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-infobars')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-dev-shm-usage')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
-        # ukrycie flagi webdriver w JS
+        
+        # Hide webdriver flag in JS
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        # Additional automation hiding
+        driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: function() { return [1, 2, 3, 4, 5]; }});")
+        driver.execute_script("Object.defineProperty(navigator, 'languages', {get: function() { return ['pl-PL', 'pl', 'en-US', 'en']; }});")
+        
         return driver
 
 
 class LinkedInLoginHandler:
     def __init__(self, driver):
         self.driver = driver
+        self.logger = LoggerSetup.get_logger("LinkedInLoginHandler")
+
+    def apply_anti_bot_measures(self):
+        """Applies additional methods to prevent bot detection after login"""
+        self.logger.info("Applying anti-bot detection measures...")
+        try:
+            # Simulate random interactions
+            Utils.random_scroll(self.driver, 200, 500)
+            Utils.random_delay(1, 2)
+            
+            # Additional browser memory modification
+            self.driver.execute_script("""
+                // Simulate localStorage
+                if (!window.localStorage) {
+                    Object.defineProperty(window, 'localStorage', {
+                        value: {
+                            getItem: function(key) { return null; },
+                            setItem: function(key, value) { return null; }
+                        }
+                    });
+                }
+                
+                // Simulate browsing history
+                if (window.history) {
+                    Object.defineProperty(history, 'length', { value: Math.floor(Math.random() * 20) + 5 });
+                }
+            """)
+            
+            # Simulate random mouse movement
+            width, height = self.driver.execute_script("return [window.innerWidth, window.innerHeight];")
+            x, y = random.randint(100, width - 200), random.randint(100, height - 200)
+            self.driver.execute_script(f"document.dispatchEvent(new MouseEvent('mousemove', {{clientX: {x}, clientY: {y}, bubbles: true}}));")
+            
+            self.logger.info("Anti-bot measures applied successfully")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to apply all anti-bot measures: {e}")
+            return False
 
     def handle_auth_wall(self):
-        login_button = wait_and_find_element(
-            self.driver,
-            By.CSS_SELECTOR,
-            "button.authwall-join-form__form-toggle--bottom"
-        )
-        if login_button:
-            self.driver.execute_script("arguments[0].click();", login_button)
-            random_delay(2, 4)
-            return True
+        # Try multiple selectors to find the login button
+        selectors = [
+            "button.authwall-join-form__form-toggle--bottom",
+            "button.sign-in-form__submit-btn",
+            "button[data-id='sign-in-form__submit-btn']",
+            "//button[contains(text(), 'Zaloguj się')]",
+            "//button[contains(text(), 'Sign in')]"
+        ]
+        
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    login_button = Utils.wait_and_find_element(self.driver, By.XPATH, selector)
+                else:
+                    login_button = Utils.wait_and_find_element(self.driver, By.CSS_SELECTOR, selector)
+                
+                if login_button:
+                    self.driver.execute_script("arguments[0].click();", login_button)
+                    Utils.random_delay(2, 4)
+                    return True
+            except Exception:
+                continue
+        
         return False
 
     def handle_challenge(self):
-        print("[INFO] Oczekiwanie na rozwiązanie ewentualnego challenge'a / captcha...")
+        self.logger.info("Waiting for potential challenge/captcha resolution...")
         while "challenge" in self.driver.current_url:
             time.sleep(5)
-        print("[INFO] Challenge rozwiązany!")
+        self.logger.info("Challenge resolved!")
 
     def login(self, email, password):
-        # Auth wall?
-        if "join" in self.driver.current_url or "authwall" in self.driver.page_source:
-            self.handle_auth_wall()
-
-        # Wpisanie e-maila
-        email_input = wait_and_find_element(
-            self.driver, By.CSS_SELECTOR, 'input[name="session_key"]'
-        )
-        if email_input:
-            self.driver.execute_script("arguments[0].value = arguments[1]", email_input, email)
-        else:
-            print("[ERROR] Nie udało się znaleźć pola e-mail!")
-            return False
-
-        # Wpisanie hasła
-        password_input = wait_and_find_element(
-            self.driver, By.CSS_SELECTOR, 'input[name="session_password"]'
-        )
-        if password_input:
-            self.driver.execute_script("arguments[0].value = arguments[1]", password_input, password)
-        else:
-            print("[ERROR] Nie udało się znaleźć pola password!")
-            return False
-
-        # Kliknięcie 'Zaloguj'
-        submit_button = wait_and_find_element(
-            self.driver, By.CSS_SELECTOR, 'button[data-id="sign-in-form__submit-btn"]'
-        )
-        if submit_button:
+        try:
+            self.logger.info("Starting login process...")
+            
+            # Auth wall check
+            if "join" in self.driver.current_url or "authwall" in self.driver.page_source:
+                self.handle_auth_wall()
+    
+            # Short delay to ensure page is loaded
+            Utils.random_delay(2, 4)
+            
+            # Find email field - try multiple selectors
+            email_selectors = [
+                'input[name="session_key"]',
+                'input[id="username"]',
+                'input[autocomplete="username"]',
+                '//input[@type="text"][@id="username"]',
+                '//input[contains(@class, "login-email")]'
+            ]
+            
+            # First search for email field and wait until it's interactive
+            email_input = None
+            for selector in email_selectors:
+                try:
+                    if selector.startswith("//"):
+                        email_input_elem = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
+                    else:
+                        email_input_elem = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                    
+                    # Make sure the element is visible and can be interacted with
+                    if email_input_elem.get_attribute("id"):
+                        email_input = WebDriverWait(self.driver, 10).until(
+                            EC.element_to_be_clickable((By.ID, email_input_elem.get_attribute("id")))
+                        )
+                    else:
+                        email_input = email_input_elem
+                    
+                    if email_input:
+                        self.logger.info(f"Found email field using selector: {selector}")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Email field not found with selector {selector}: {e}")
+                    continue
+            
+            if not email_input:
+                # Last attempt - find any text field
+                try:
+                    email_input = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, "//input[@type='text' or @type='email']"))
+                    )
+                    self.logger.info("Found email field using fallback selector")
+                except Exception as e:
+                    self.logger.error(f"Could not find email field after multiple attempts: {e}")
+                    return False
+            
+            # Clear field before typing
+            email_input.clear()
+            
+            # Click on field and check if it's active
+            self.driver.execute_script("arguments[0].click();", email_input)
+            Utils.random_delay(0.5, 1)
+            
+            # Make sure the field is active before using send_keys
+            active_element = self.driver.execute_script("return document.activeElement;")
+            if active_element.get_attribute("id") != email_input.get_attribute("id"):
+                self.logger.warning("Email field is not active, trying to re-activate")
+                self.driver.execute_script("arguments[0].focus();", email_input)
+                Utils.random_delay(0.5, 1)
+            
+            # Type email directly via JavaScript
+            self.driver.execute_script(f"arguments[0].value = '{email}';", email_input)
+            
+            # Simulate change/input event
+            self.driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", email_input)
+            self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
+            
+            Utils.random_delay(1, 2)
+            
+            # Find password field - similar approach as for email
+            password_selectors = [
+                'input[name="session_password"]',
+                'input[id="password"]',
+                'input[autocomplete="current-password"]',
+                '//input[@type="password"]',
+                '//input[contains(@class, "login-password")]'
+            ]
+            
+            password_input = None
+            for selector in password_selectors:
+                try:
+                    if selector.startswith("//"):
+                        password_input_elem = WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
+                    else:
+                        password_input_elem = WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                    
+                    # Make sure the element is visible and can be interacted with
+                    if password_input_elem.get_attribute("id"):
+                        password_input = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.ID, password_input_elem.get_attribute("id")))
+                        )
+                    else:
+                        password_input = password_input_elem
+                    
+                    if password_input:
+                        self.logger.info(f"Found password field using selector: {selector}")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Password field not found with selector {selector}: {e}")
+                    continue
+            
+            if not password_input:
+                # Last attempt - find any password field
+                try:
+                    password_input = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, "//input[@type='password']"))
+                    )
+                    self.logger.info("Found password field using fallback selector")
+                except Exception as e:
+                    self.logger.error(f"Could not find password field after multiple attempts: {e}")
+                    return False
+            
+            # Clear field before typing
+            password_input.clear()
+            
+            # Click on field and check if it's active
+            self.driver.execute_script("arguments[0].click();", password_input)
+            Utils.random_delay(0.5, 1)
+            
+            # Type password directly via JavaScript
+            self.driver.execute_script(f"arguments[0].value = '{password}';", password_input)
+            
+            # Simulate change/input event
+            self.driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", password_input)
+            self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", password_input)
+            
+            Utils.random_delay(1, 2)
+    
+            # Click 'Login' - try multiple selectors
+            submit_selectors = [
+                'button[data-id="sign-in-form__submit-btn"]',
+                'button.sign-in-form__submit-button',
+                'button[type="submit"]',
+                '//button[contains(text(), "Zaloguj")]',
+                '//button[contains(text(), "Sign in")]'
+            ]
+            
+            submit_button = None
+            for selector in submit_selectors:
+                try:
+                    if selector.startswith("//"):
+                        submit_button = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, selector))
+                        )
+                    else:
+                        submit_button = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                    
+                    if submit_button:
+                        self.logger.info(f"Found login button using selector: {selector}")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Login button not found with selector {selector}: {e}")
+                    continue
+            
+            if not submit_button:
+                self.logger.error("Could not find 'Login' button after multiple attempts")
+                return False
+            
+            # Add random delay before clicking
+            Utils.random_delay(1, 2)
+            
+            # Use JavaScript to click the button
             self.driver.execute_script("arguments[0].click();", submit_button)
-            random_delay(4, 6)
+            self.logger.info("Clicked login button")
+            
+            # Longer wait for loading after login
+            Utils.random_delay(4, 6)
+            
             if "challenge" in self.driver.current_url:
                 self.handle_challenge()
-        else:
-            print("[ERROR] Nie udało się znaleźć przycisku 'Zaloguj'.")
+    
+            # Login verification
+            is_logged_in = any(marker in self.driver.current_url for marker in ["/feed", "/in/", "mynetwork"])
+            
+            if is_logged_in:
+                self.logger.info("Logged in successfully!")
+                
+                # Apply anti-bot measures after login
+                self.apply_anti_bot_measures()
+            else:
+                self.logger.error("Login failed. Check credentials or if captcha is required.")
+                
+            return is_logged_in
+            
+        except Exception as e:
+            self.logger.error(f"Unexpected error during login: {e}")
             return False
-
-        # Weryfikacja zalogowania - bardziej ogólna, działa dla wszystkich przypadków
-        random_delay(2, 4)
-        return any(marker in self.driver.current_url for marker in ["/feed", "/in/", "mynetwork"])
 
 
 class LinkedInCommentHandler:
     def __init__(self, driver):
         self.driver = driver
+        self.logger = LoggerSetup.get_logger("LinkedInCommentHandler")
 
     def expand_replies(self):
-        # Zobacz więcej odpowiedzi
-        more_replies_buttons = self.driver.find_elements(
-            By.XPATH, "//button[contains(text(), 'Zobacz więcej odpowiedzi')]"
-        )
+        # More general XPath selector for "See more replies" buttons
+        more_replies_buttons_xpath = "//button[contains(text(), 'Zobacz więcej') or contains(text(), 'więcej odpowiedzi') or contains(text(), 'Show more') or contains(text(), 'more replies')]"
+        more_replies_buttons = self.driver.find_elements(By.XPATH, more_replies_buttons_xpath)
+        
         for btn in more_replies_buttons:
             try:
                 self.driver.execute_script("arguments[0].click();", btn)
-                random_delay(1, 2)
-            except Exception:
-                pass
+                Utils.random_delay(1, 2)
+            except Exception as e:
+                self.logger.debug(f"Failed to click 'See more replies' button: {e}")
 
-        # Zobacz poprzednie odpowiedzi
-        prev_replies_buttons = self.driver.find_elements(
-            By.XPATH, "//button[contains(text(), 'Zobacz poprzednie odpowiedzi')]"
-        )
+        # More general XPath selector for "See previous replies" buttons
+        prev_replies_buttons_xpath = "//button[contains(text(), 'Zobacz poprzednie') or contains(text(), 'poprzednie odpowiedzi') or contains(text(), 'Show previous') or contains(text(), 'previous replies')]"
+        prev_replies_buttons = self.driver.find_elements(By.XPATH, prev_replies_buttons_xpath)
+        
         for btn in prev_replies_buttons:
             try:
                 self.driver.execute_script("arguments[0].click();", btn)
-                random_delay(1.5, 2.5)
-            except Exception:
-                pass
+                Utils.random_delay(1.5, 2.5)
+            except Exception as e:
+                self.logger.debug(f"Failed to click 'See previous replies' button: {e}")
 
     def load_all_pages(self):
         while True:
             self.expand_replies()
-            load_more_button = self.driver.find_elements(
-                By.CSS_SELECTOR, ".scaffold-finite-scroll__load-button"
-            )
+            
+            # More general approach to finding "Show more" button
+            load_more_selectors = [
+                ".scaffold-finite-scroll__load-button",
+                "button.scaffold-finite-scroll__load-button",
+                "//button[contains(text(), 'Pokaż więcej') or contains(text(), 'Show more') or contains(text(), 'Load more')]"
+            ]
+            
+            load_more_button = None
+            for selector in load_more_selectors:
+                try:
+                    if selector.startswith("//"):
+                        elements = self.driver.find_elements(By.XPATH, selector)
+                    else:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    
+                    if elements:
+                        load_more_button = elements[0]
+                        break
+                except Exception:
+                    continue
+            
             if load_more_button:
                 try:
-                    self.driver.execute_script(
-                        "arguments[0].scrollIntoView(true);", load_more_button[0]
-                    )
-                    random_delay(0.5, 1)
-                    self.driver.execute_script("arguments[0].click();", load_more_button[0])
-                    random_delay(1.5, 2.5)
-                except Exception:
-                    print("[WARN] Nie udało się kliknąć 'Pokaż więcej wyników'")
+                    # Scroll to button
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", load_more_button)
+                    Utils.random_delay(0.5, 1)
+                    
+                    # Click button
+                    self.driver.execute_script("arguments[0].click();", load_more_button)
+                    Utils.random_delay(1.5, 2.5)
+                    
+                    # Add random page scrolling for better human simulation
+                    Utils.random_scroll(self.driver)
+                except Exception as e:
+                    self.logger.warning(f"Failed to click 'Show more results': {e}")
                     break
             else:
                 break
+
+    def find_comments_container(self):
+        """Finds the comments container using multiple strategies"""
+        container_selectors = [
+            "div.scaffold-finite-scroll__content",
+            "div[class*='comments-container']",
+            "div[data-test-id='comments-container']",
+            "//div[contains(@class, 'scaffold-finite-scroll__content')]",
+            "//div[contains(@class, 'comments-container')]"
+        ]
+        
+        for selector in container_selectors:
+            try:
+                if selector.startswith("//"):
+                    container = Utils.wait_and_find_element(self.driver, By.XPATH, selector, timeout=5)
+                else:
+                    container = Utils.wait_and_find_element(self.driver, By.CSS_SELECTOR, selector, timeout=5)
+                
+                if container:
+                    return container
+            except Exception:
+                continue
+        
+        return None
 
     def gather_damian_comment_ids(self) -> Set[str]:
         comment_ids = set()
         self.load_all_pages()
 
-        container = wait_and_find_element(
-            self.driver, By.CLASS_NAME, "scaffold-finite-scroll__content", timeout=10
-        )
+        # Find comments container
+        container = self.find_comments_container()
+        
         if not container:
-            print("[ERROR] Nie znaleziono kontenera komentarzy")
+            self.logger.error("Comments container not found")
             return set()
 
-        # Szukamy wszystkich <article> z komentarzem
-        articles = container.find_elements(By.CSS_SELECTOR, "article.comments-comment-entity")
-        print(f"[INFO] Znaleziono {len(articles)} komentarzy (article.comments-comment-entity)")
+        # More general approach to finding comment articles
+        article_selectors = [
+            "article.comments-comment-entity",
+            "article[data-id]",
+            "article[class*='comment']",
+            "//article[contains(@class, 'comments-comment')]",
+            "//article[@data-id]"
+        ]
+        
+        articles = []
+        for selector in article_selectors:
+            try:
+                if selector.startswith("//"):
+                    articles = container.find_elements(By.XPATH, selector)
+                else:
+                    articles = container.find_elements(By.CSS_SELECTOR, selector)
+                
+                if articles:
+                    self.logger.info(f"Found {len(articles)} comments using selector: {selector}")
+                    break
+            except Exception:
+                continue
+        
+        if not articles:
+            self.logger.error("No comment articles found")
+            return set()
 
+        # Collecting author's comment IDs
         for article in articles:
             try:
-                actor_section = article.find_element(By.CSS_SELECTOR, ".comments-comment-meta__actor")
-                if AUTOR in actor_section.text:
+                # More general approach to finding the author section
+                actor_selectors = [
+                    ".comments-comment-meta__actor",
+                    "div[class*='comment-meta__actor']",
+                    "div[class*='actor']",
+                    "//div[contains(@class, 'actor')]",
+                    "//a[contains(@class, 'actor')]"
+                ]
+                
+                actor_section = None
+                for selector in actor_selectors:
+                    try:
+                        if selector.startswith("//"):
+                            actor_section = article.find_element(By.XPATH, selector)
+                        else:
+                            actor_section = article.find_element(By.CSS_SELECTOR, selector)
+                        
+                        if actor_section:
+                            break
+                    except Exception:
+                        continue
+                
+                # Check if this is our author's comment
+                if actor_section and Config.AUTOR in actor_section.text:
+                    # Find data-id using different methods
                     data_id = article.get_attribute("data-id")
+                    
+                    if not data_id:
+                        # Try finding ID using other attributes
+                        for attr in ["id", "article-id", "comment-id"]:
+                            data_id = article.get_attribute(attr)
+                            if data_id:
+                                break
+                        
+                        # If still no ID, try to find it in classes
+                        if not data_id:
+                            class_name = article.get_attribute("class")
+                            if class_name:
+                                # Search for ID pattern in classes
+                                id_pattern = re.search(r'id-([a-zA-Z0-9_-]+)', class_name)
+                                if id_pattern:
+                                    data_id = id_pattern.group(1)
+                    
                     if data_id:
                         comment_ids.add(data_id)
+                        self.logger.debug(f"Found author's comment: {data_id}")
+                        
             except StaleElementReferenceException:
-                pass
+                self.logger.debug("Element became stale during processing")
             except Exception as e:
-                print(f"[WARN] gather_damian_comment_ids: Nie udało się odczytać ID artykułu: {e}")
+                self.logger.warning(f"gather_damian_comment_ids: Failed to read article ID: {e}")
 
         return comment_ids
 
     def find_article_by_id(self, comment_id: str):
+        """Finds an article based on comment ID - with multiple method handling"""
         try:
+            # Scroll to top of page
             self.driver.execute_script("window.scrollTo(0, 0)")
-            random_delay(0.5, 1.5)
-            selector = f"article.comments-comment-entity[data-id='{comment_id}']"
-            return self.driver.find_element(By.CSS_SELECTOR, selector)
-        except NoSuchElementException:
+            Utils.random_delay(0.5, 1.5)
+            
+            # Try different selectors
+            selectors = [
+                f"article.comments-comment-entity[data-id='{comment_id}']",
+                f"article[data-id='{comment_id}']",
+                f"//article[@data-id='{comment_id}']",
+                f"//article[contains(@class, 'comment')][contains(@data-id, '{comment_id}')]",
+                f"//article[contains(@class, 'comment')][@id='{comment_id}']"
+            ]
+            
+            for selector in selectors:
+                try:
+                    if selector.startswith("//"):
+                        article = self.driver.find_element(By.XPATH, selector)
+                    else:
+                        article = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    
+                    if article:
+                        return article
+                except Exception:
+                    continue
+            
             return None
-        except StaleElementReferenceException:
-            return None
+            
         except Exception as e:
-            print(f"[WARN] find_article_by_id({comment_id}): {e}")
+            self.logger.warning(f"find_article_by_id({comment_id}): {e}")
             return None
+
+    def find_options_button(self, article):
+        """Finds the '...' options button in the comment article"""
+        options_selectors = [
+            ".artdeco-dropdown__trigger",
+            "button.artdeco-dropdown__trigger",
+            "button[class*='dropdown__trigger']",
+            "//button[contains(@class, 'dropdown__trigger')]",
+            "//button[contains(@class, 'overflow') or contains(@class, 'options')]",
+            "//button[contains(@aria-label, 'More actions')]"
+        ]
+        
+        for selector in options_selectors:
+            try:
+                if selector.startswith("//"):
+                    options_button = article.find_element(By.XPATH, selector)
+                else:
+                    options_button = article.find_element(By.CSS_SELECTOR, selector)
+                
+                if options_button:
+                    return options_button
+            except Exception:
+                continue
+        
+        return None
+
+    def find_delete_button(self):
+        """Finds the 'Delete' button in the comment options menu"""
+        delete_selectors = [
+            "//span[text()='Usuń']",
+            "//span[text()='Delete']",
+            "//span[contains(text(), 'Usuń')]",
+            "//button[contains(text(), 'Usuń')]",
+            "//div[contains(@class, 'dropdown__item')]//span[contains(text(), 'Usuń')]"
+        ]
+        
+        for selector in delete_selectors:
+            try:
+                delete_buttons = self.driver.find_elements(By.XPATH, selector)
+                if delete_buttons:
+                    return delete_buttons[0]
+            except Exception:
+                continue
+        
+        return None
+
+    def find_confirm_delete_button(self):
+        """Finds the delete confirmation button"""
+        confirm_selectors = [
+            "//button//span[text()='Usuń']",
+            "//button//span[text()='Delete']",
+            "//button[contains(text(), 'Usuń')]",
+            "//button[contains(@class, 'confirm-delete')]",
+            "//div[contains(@class, 'confirmation')]//button[contains(text(), 'Usuń')]"
+        ]
+        
+        for selector in confirm_selectors:
+            try:
+                confirm_button = Utils.wait_and_find_element(self.driver, By.XPATH, selector, timeout=5)
+                if confirm_button:
+                    return confirm_button
+            except Exception:
+                continue
+        
+        return None
 
     def delete_comment_by_id(self, comment_id: str) -> bool:
         article = self.find_article_by_id(comment_id)
         if not article:
+            self.logger.warning(f"Article with ID not found: {comment_id}")
             return False
 
         try:
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", article)
-            random_delay(0.5, 1.5)
+            # Scroll to article
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", article)
+            Utils.random_delay(0.5, 1.5)
 
-            # Kliknij w "..."
-            options_button = article.find_element(By.CSS_SELECTOR, ".artdeco-dropdown__trigger")
+            # Find options button ("...")
+            options_button = self.find_options_button(article)
+            if not options_button:
+                self.logger.warning(f"Options button not found for comment {comment_id}")
+                return False
+                
+            # Click options button
             self.driver.execute_script("arguments[0].click();", options_button)
-            random_delay(0.5, 1.5)
+            Utils.random_delay(0.5, 1.5)
 
-            # Przycisk "Usuń"
-            delete_buttons = self.driver.find_elements(By.XPATH, "//span[text()='Usuń']")
-            if not delete_buttons:
-                print(f"[WARN] Brak przycisku 'Usuń' dla komentarza {comment_id}")
+            # Find "Delete" button
+            delete_button = self.find_delete_button()
+            if not delete_button:
+                self.logger.warning(f"No 'Delete' button for comment {comment_id}")
                 return False
-            self.driver.execute_script("arguments[0].click();", delete_buttons[0])
-            random_delay(0.5, 1.5)
+                
+            # Click "Delete" button
+            self.driver.execute_script("arguments[0].click();", delete_button)
+            Utils.random_delay(0.5, 1.5)
 
-            # Potwierdzenie
-            confirm_btn = wait_and_find_element(
-                self.driver, By.XPATH, "//button//span[text()='Usuń']", timeout=5
-            )
-
+            # Find confirmation button
+            confirm_btn = self.find_confirm_delete_button()
             if not confirm_btn:
+                self.logger.warning(f"Confirmation button not found for comment {comment_id}")
                 return False
 
+            # Click confirmation button
             self.driver.execute_script("arguments[0].click();", confirm_btn)
-            random_delay(1.5, 2.5)
+            Utils.random_delay(1.5, 2.5)
             return True
 
         except Exception as e:
-            print(f"[ERROR] Błąd usuwania komentarza {comment_id}: {e}")
+            self.logger.error(f"Error deleting comment {comment_id}: {e}")
             return False
 
     def delete_comments_with_retry(self, comment_ids: Set[str]):
@@ -263,53 +728,53 @@ class LinkedInCommentHandler:
 
         for pass_index in range(1, max_passes+1):
             if not to_remove:
-                print("[INFO] Nie ma już komentarzy do usunięcia. Koniec!")
+                self.logger.info("No more comments to delete. Finished!")
                 break
 
-            print(f"[INFO] Usuwanie komentarzy (pass {pass_index}/{max_passes}). Zostało: {len(to_remove)}")
+            self.logger.info(f"Deleting comments (pass {pass_index}/{max_passes}). Remaining: {len(to_remove)}")
 
             failed_this_round = set()
 
             for cid in list(to_remove):
                 success = self.delete_comment_by_id(cid)
                 if success:
-                    print(f"[INFO] Komentarz {cid} usunięty")
+                    self.logger.info(f"Comment {cid} deleted")
                     to_remove.remove(cid)
                 else:
-                    # Nie udało się usunąć, spróbujemy w następnym "passie"
+                    # Failed to delete, will try in next pass
                     failed_this_round.add(cid)
 
             if len(failed_this_round) == len(to_remove):
-                print("[INFO] Odświeżam stronę, bo nie udało się usunąć dodatkowych komentarzy")
+                self.logger.info("Refreshing page because no additional comments were deleted")
                 self.driver.refresh()
-                random_delay(3, 5)
+                Utils.random_delay(3, 5)
             else:
-                # Odśwież i wczytaj ponownie, by "ożywić" DOM
+                # Refresh and reload to "revive" the DOM
                 self.driver.refresh()
-                random_delay(3, 5)
+                Utils.random_delay(3, 5)
 
-                # Po odświeżeniu wchodzimy jeszcze raz w COMMENTS_URL
-                self.driver.get(COMMENTS_URL)
-                random_delay(3, 5)
+                # After refreshing, go to COMMENTS_URL again
+                self.driver.get(Config.COMMENTS_URL)
+                Utils.random_delay(3, 5)
                 self.load_all_pages()
 
         if to_remove:
-            print("[WARN] Nie udało się ostatecznie usunąć następujących komentarzy:")
+            self.logger.warning("Failed to delete the following comments:")
             for c in to_remove:
-                print(f"   - {c}")
+                self.logger.warning(f"   - {c}")
         else:
-            print("[INFO] Wszystkie komentarze zostały usunięte")
+            self.logger.info("All comments have been deleted")
 
     def find_and_delete_comments(self):
-        self.driver.get(COMMENTS_URL)
-        random_delay(2, 4)
+        self.driver.get(Config.COMMENTS_URL)
+        Utils.random_delay(2, 4)
 
         comment_ids = self.gather_damian_comment_ids()
         if not comment_ids:
-            print("[INFO] Nie znaleziono komentarzy Damiana do usunięcia")
+            self.logger.info("No Damian's comments found to delete")
             return
 
-        print(f"[INFO] Zebrano {len(comment_ids)} komentarzy Damiana do usunięcia")
+        self.logger.info(f"Collected {len(comment_ids)} of Damian's comments to delete")
         self.delete_comments_with_retry(comment_ids)
 
 
@@ -318,74 +783,149 @@ class LinkedInPeopleSearchHandler:
         self.driver = driver
         self.profiles = []
         self.search_query = search_query
-        self.csv_filename = create_filename_from_query(search_query)
-        self.csv_initialized = False
-        self.field_names = ["name", "title", "location", "current_company", "profile_url"]
+        self.json_filename = Utils.create_filename_from_query(search_query)
+        self.json_initialized = False
+        self.discovered_profile_selector = None
+        self.discovered_title_selector = None
+        self.discovered_location_selector = None
+        self.discovered_summary_selector = None
+        self.logger = LoggerSetup.get_logger("LinkedInPeopleSearchHandler")
 
-    def try_multiple_selectors(self, element, selectors, method=By.CSS_SELECTOR):
-        """Próbuje wielu selektorów, zwraca pierwszy znaleziony element"""
-        for selector in selectors:
-            try:
-                found = element.find_element(method, selector)
-                if found:
-                    return found
-            except Exception:
-                continue
-        return None
+    def discover_selectors(self):
+        """Dynamically discovers selectors for profile elements"""
+        self.logger.info("Attempting to automatically discover selectors...")
         
-    def search_people(self, search_query):
-        """Wykonuje wyszukiwanie osób na LinkedIn"""
-        print(f"[INFO] Wyszukiwanie osób dla zapytania: '{search_query}'")
-        
-        # Przejdź do strony głównej LinkedIn
-        self.driver.get("https://www.linkedin.com/")
-        random_delay(2, 4)
-        
-        # Znajdź pole wyszukiwania
-        search_input = wait_and_find_element(
-            self.driver, 
-            By.CSS_SELECTOR, 
-            "input.search-global-typeahead__input"
-        )
-        
-        if not search_input:
-            print("[ERROR] Nie znaleziono pola wyszukiwania")
-            return False
-        
-        # Wyczyść pole i wpisz zapytanie
-        search_input.clear()
-        search_input.send_keys(search_query)
-        random_delay(0.5, 1.5)
-        search_input.send_keys(Keys.ENTER)
-        random_delay(2, 4)
-        
-        # Sprawdź, czy jesteśmy na stronie wyników wyszukiwania
         try:
-            # Przejdź do wyników wyszukiwania osób (jeśli nie jesteśmy tam jeszcze)
-            people_results_selectors = [
-                "//a[contains(text(), 'Zobacz wszystkie wyniki osób')]",
-                "//a[contains(text(), 'See all people results')]",
-                "//a[contains(@href, '/search/results/people')]"
-            ]
+            # First wait for results to load
+            results_container = Utils.wait_and_find_element(
+                self.driver,
+                By.CSS_SELECTOR,
+                "ul[class*='list-style-none']",
+                timeout=10
+            )
             
-            for selector in people_results_selectors:
-                try:
-                    people_link = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    self.driver.execute_script("arguments[0].click();", people_link)
-                    random_delay(2, 4)
-                    break
-                except TimeoutException:
+            if not results_container:
+                self.logger.error("Search results container not found")
+                return False
+                
+            # 1. Find li elements containing links to profiles
+            profile_elements = self.driver.find_elements(By.XPATH, "//li[.//a[contains(@href, '/in/')]]")
+            
+            # If no profiles, try another method
+            if not profile_elements or len(profile_elements) == 0:
+                self.logger.warning("No profiles found using standard method, trying alternative selectors")
+                
+                # Alternative approach - find li elements in results container
+                profile_elements = results_container.find_elements(By.XPATH, ".//li")
+                
+                # One more alternative - look for div elements with profile links
+                if not profile_elements or len(profile_elements) == 0:
+                    profile_elements = self.driver.find_elements(By.XPATH, "//div[.//a[contains(@href, '/in/')]]")
+            
+            if profile_elements and len(profile_elements) > 0:
+                self.logger.info(f"Found {len(profile_elements)} potential profile elements")
+                
+                # Take first profile element
+                sample_profile = profile_elements[0]
+                
+                # Get class of first element
+                profile_class = sample_profile.get_attribute('class')
+                if profile_class:
+                    classes = profile_class.split()
+                    if classes:
+                        self.discovered_profile_selector = f"li.{classes[0]}"
+                        self.logger.info(f"Detected profile selector: {self.discovered_profile_selector}")
+                
+                # Analyze profile structure to identify key elements
+                # Check potential title/position elements
+                title_candidates = sample_profile.find_elements(By.XPATH, ".//div[contains(@class, 't-black')]")
+                location_candidates = sample_profile.find_elements(By.XPATH, ".//div[contains(@class, 't-normal')]")
+                summary_candidates = sample_profile.find_elements(By.XPATH, ".//p[contains(@class, 't-12') or contains(@class, 'entity-result__summary')]")
+                
+                # Save full text of first profile for analysis
+                self.logger.info(f"First profile text: {sample_profile.text}")
+                
+                # Title elements analysis
+                if title_candidates and len(title_candidates) > 0:
+                    title_class = title_candidates[0].get_attribute('class')
+                    title_text = title_candidates[0].text
+                    self.logger.info(f"Potential title element: {title_text}")
+                    self.logger.info(f"Title element class: {title_class}")
+                    
+                    if title_class:
+                        classes = title_class.split()
+                        if classes:
+                            self.discovered_title_selector = f"div.{classes[0]}"
+                            self.logger.info(f"Detected title selector: {self.discovered_title_selector}")
+                
+                # Location elements analysis
+                if location_candidates and len(location_candidates) > 1:
+                    location_class = location_candidates[1].get_attribute('class')
+                    location_text = location_candidates[1].text
+                    self.logger.info(f"Potential location element: {location_text}")
+                    self.logger.info(f"Location element class: {location_class}")
+                    
+                    if location_class:
+                        classes = location_class.split()
+                        if classes:
+                            self.discovered_location_selector = f"div.{classes[0]}"
+                            self.logger.info(f"Detected location selector: {self.discovered_location_selector}")
+                
+                # Summary elements analysis
+                if summary_candidates and len(summary_candidates) > 0:
+                    summary_class = summary_candidates[0].get_attribute('class')
+                    summary_text = summary_candidates[0].text
+                    self.logger.info(f"Potential summary element: {summary_text}")
+                    self.logger.info(f"Summary element class: {summary_class}")
+                    
+                    if summary_class:
+                        classes = summary_class.split()
+                        if classes:
+                            self.discovered_summary_selector = f"p.{classes[0]}"
+                            self.logger.info(f"Detected summary selector: {self.discovered_summary_selector}")
+                        
+                return True
+            else:
+                self.logger.error("No profile elements found during selector discovery")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Error during selector discovery: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False
+
+    def find_elements_with_retry(self, strategies):
+        """Tries different strategies for finding elements"""
+        for strategy_name, by_method, selector in strategies:
+            try:
+                if not selector:
                     continue
-        except TimeoutException:
-            # Możliwe, że już jesteśmy na stronie wyników wyszukiwania osób
-            pass
+                    
+                elements = self.driver.find_elements(by_method, selector)
+                if elements and len(elements) > 0:
+                    self.logger.info(f"Found elements using strategy: {strategy_name}")
+                    return elements
+            except Exception as e:
+                self.logger.debug(f"Failed to find elements with strategy {strategy_name}: {e}")
+                continue
+        return []
+
+    def extract_text_pattern(self, element_text, pattern_list, default=""):
+        """Extracts text matching one of the patterns from the full element text"""
+        if not element_text:
+            return default
+            
+        # Search each pattern in text
+        for pattern in pattern_list:
+            match = re.search(pattern, element_text)
+            if match:
+                return match.group(1) if match.groups() else match.group(0)
         
-        return "search/results/people" in self.driver.current_url
+        return default
 
     def extract_profile_data(self, profile_element):
-        """Ekstrahuje dane profilu z elementu li z odpornością na zmiany klas CSS"""
+        """Extracts profile data from li element - with adaptive approach"""
         profile_data = {
             "name": "",
             "title": "",
@@ -395,1104 +935,735 @@ class LinkedInPeopleSearchHandler:
         }
         
         try:
-            # 1. Znajdowanie imienia i nazwiska - bardziej niezawodne selektory
-            name_selectors = [
-                "span.oKYGlVrMBpBFJGUyCKYRrybaptZoazvfkw a", 
-                "span[class*='t-16'] a", 
-                ".entity-result__title-text a",
-                "a[href*='/in/']"
-            ]
+            # Get full text of profile element for analysis
+            full_element_text = profile_element.text
+            self.logger.debug(f"Analyzing profile with text: {full_element_text}")
             
-            name_element = self.try_multiple_selectors(profile_element, name_selectors)
+            # 1. Find name and profile address
+            name_elements = profile_element.find_elements(By.XPATH, ".//a[contains(@href, '/in/')]")
             
-            if not name_element:
-                # Próba z XPath
-                try:
-                    name_element = profile_element.find_element(By.XPATH, ".//a[contains(@href, '/in/')]")
-                except:
-                    pass
-            
-            if name_element:
-                profile_data["name"] = name_element.text.strip()
-                profile_data["profile_url"] = name_element.get_attribute("href").split("?")[0]
-            
-            # 2. Pobieranie tytułu stanowiska - wiele metod
-            title_selectors = [
-                "div.ouqFDUJCzhugPNpegQHNhfazHmnfHzSY",
-                "div[class*='t-black'][class*='t-normal']",
-                ".entity-result__primary-subtitle"
-            ]
-            
-            title_element = self.try_multiple_selectors(profile_element, title_selectors)
-            if title_element:
-                profile_data["title"] = title_element.text.strip()
-            
-            # 3. Pobieranie lokalizacji - na podstawie pozycji lub tekstu
-            location_selectors = [
-                "div.yrFkFoofyxGfbvnrSMDkNyhQrcHfzJoYxXKs",
-                "div[class*='t-normal']:not([class*='t-black'])",
-                ".entity-result__secondary-subtitle"
-            ]
-            
-            location_element = self.try_multiple_selectors(profile_element, location_selectors)
-            if location_element:
-                profile_data["location"] = location_element.text.strip()
-            
-            # 4. Pobieranie informacji o obecnej firmie
-            summary_selectors = [
-                "p.vTpTcUIchIiDnwMRhFHzqVOINVNBpiWDnpYA",
-                "p[class*='entity-result__summary']", 
-                "p[class*='t-12']"
-            ]
-            
-            summary_element = self.try_multiple_selectors(profile_element, summary_selectors)
-            if summary_element:
-                summary_text = summary_element.text.strip()
-                if "Obecnie:" in summary_text:
-                    current_company = summary_text.split("Obecnie:")[1].strip()
-                    profile_data["current_company"] = current_company
+            for name_element in name_elements:
+                element_text = name_element.text
+                element_href = name_element.get_attribute("href")
                 
+                if element_text and element_href and '/in/' in element_href:
+                    name_text = re.sub(r'Wyświetl profil użytkownika\s+', '', element_text)
+                    name_text = re.sub(r'[•]\s+\d+\.\s+.*$', '', name_text).strip()
+                    name_text = re.sub(r'<[^>]+>', '', name_text).strip()
+                    
+                    profile_data["name"] = name_text
+                    profile_data["profile_url"] = element_href.split("?")[0]
+                    break
+            
+            # 2. Extract title/position - improved algorithm
+            
+            # Method 1: Try direct search by classes t-14 + t-black + t-normal
+            title_elements = profile_element.find_elements(By.XPATH, 
+                ".//div[contains(@class, 't-14') and contains(@class, 't-black') and contains(@class, 't-normal')]")
+            
+            if title_elements and len(title_elements) > 0:
+                for elem in title_elements:
+                    text = elem.text.strip()
+                    # Make sure found text isn't the same as name
+                    if text and text != profile_data["name"]:
+                        profile_data["title"] = text
+                        break
+            
+            # Method 2: Use discovered selector if title still not found
+            if not profile_data["title"] and self.discovered_title_selector:
+                try:
+                    title_elements = profile_element.find_elements(By.CSS_SELECTOR, self.discovered_title_selector)
+                    if title_elements and len(title_elements) > 0:
+                        text = title_elements[0].text.strip()
+                        if text and text != profile_data["name"]:
+                            profile_data["title"] = text
+                except Exception as e:
+                    self.logger.debug(f"Error using discovered_title_selector: {e}")
+            
+            # Method 3: Search by keywords related to positions
+            if not profile_data["title"] or profile_data["title"] == profile_data["name"]:
+                keyword_elements = profile_element.find_elements(By.XPATH,
+                    ".//div[contains(text(), 'Engineer') or contains(text(), 'Developer') or contains(text(), 'Security') or contains(text(), 'Analyst') or contains(text(), 'Manager')]")
+                
+                if keyword_elements and len(keyword_elements) > 0:
+                    for elem in keyword_elements:
+                        text = elem.text.strip()
+                        if text and text != profile_data["name"] and "Kontakt" not in text and "Zobacz" not in text:
+                            profile_data["title"] = text
+                            break
+            
+            # 3. Extract location - unchanged
+            if self.discovered_location_selector:
+                try:
+                    location_elements = profile_element.find_elements(By.CSS_SELECTOR, self.discovered_location_selector)
+                    if location_elements and len(location_elements) > 0:
+                        profile_data["location"] = location_elements[0].text.strip()
+                except Exception as e:
+                    self.logger.debug(f"Error using discovered_location_selector: {e}")
+            
+            # Other location search methods - unchanged
+            
+            # 4. Extract current company - improved
+            if self.discovered_summary_selector:
+                try:
+                    summary_elements = profile_element.find_elements(By.CSS_SELECTOR, self.discovered_summary_selector)
+                    if summary_elements and len(summary_elements) > 0:
+                        summary_text = summary_elements[0].text
+                        
+                        # Improved regex to extract company name
+                        company_match = re.search(r'Obecnie:.*?\s+w\s+([^•\n]+)', summary_text, re.IGNORECASE)
+                        if company_match:
+                            profile_data["current_company"] = company_match.group(1).strip()
+                        else:
+                            # Alternative pattern
+                            company_match = re.search(r'Obecnie:.*?([A-Z][a-zA-Z0-9\s]+)$', summary_text)
+                            if company_match:
+                                profile_data["current_company"] = company_match.group(1).strip()
+                except Exception as e:
+                    self.logger.debug(f"Error using discovered_summary_selector: {e}")
+            
+            # Final data cleaning
+            for key in profile_data:
+                if profile_data[key]:
+                    profile_data[key] = re.sub(r'\n.*$', '', profile_data[key]).strip()
+                    profile_data[key] = re.sub(r'<[^>]+>', '', profile_data[key]).strip()
+            
+            # Final verification - make sure title isn't name
+            if profile_data["title"] == profile_data["name"]:
+                profile_data["title"] = ""
+                
+            self.logger.debug(f"Extracted profile data: {profile_data}")
+            
         except Exception as e:
-            print(f"[WARN] Błąd podczas ekstrahowania danych profilu: {e}")
+            self.logger.warning(f"Error extracting profile data: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
             
         return profile_data
-    
-    def init_csv_file(self):
-        """Inicjalizuje plik CSV z nagłówkami"""
-        if not self.csv_initialized:
-            file_exists = os.path.isfile(self.csv_filename)
-            
-            with open(self.csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=self.field_names)
-                if not file_exists:
-                    writer.writeheader()
-            
-            self.csv_initialized = True
-            print(f"[INFO] Zainicjalizowano plik CSV: {self.csv_filename}")
 
-    def append_profile_to_csv(self, profile):
-        """Dodaje pojedynczy profil do pliku CSV"""
+    def init_json_file(self):
+        """Initializes JSON file with empty array"""
+        if not self.json_initialized:
+            with open(self.json_filename, 'w', encoding='utf-8') as jsonfile:
+                json.dump([], jsonfile)
+            
+            self.json_initialized = True
+            self.logger.info(f"Initialized JSON file: {self.json_filename}")
+
+    def append_profile_to_json(self, profile):
+        """Adds a single profile to JSON file"""
         try:
-            with open(self.csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=self.field_names)
-                writer.writerow(profile)
-            print(f"[INFO] Dodano do CSV: {profile['name']} - {profile['title']}")
+            # Read current data
+            profiles = []
+            if os.path.exists(self.json_filename) and os.path.getsize(self.json_filename) > 0:
+                with open(self.json_filename, 'r', encoding='utf-8') as jsonfile:
+                    profiles = json.load(jsonfile)
+            
+            # Add new profile
+            profiles.append(profile)
+            
+            # Save updated data
+            with open(self.json_filename, 'w', encoding='utf-8') as jsonfile:
+                json.dump(profiles, jsonfile, ensure_ascii=False, indent=2)
+                
+            self.logger.info(f"Added to JSON: {profile['name']} - {profile['title']}")
         except Exception as e:
-            print(f"[ERROR] Błąd podczas zapisywania do CSV: {e}")
+            self.logger.error(f"Error saving to JSON: {e}")
         
     def process_search_results_page(self):
-        """Przetwarza stronę wyników wyszukiwania i pobiera dane profilów"""
-        print("[INFO] Przetwarzanie strony wyników wyszukiwania")
+        """Processes search results page and collects profile data"""
+        self.logger.info("Processing search results page")
         
-        # Poczekaj na załadowanie wyników
-        wait_and_find_element(
+        # Wait for results to load
+        Utils.wait_and_find_element(
             self.driver, 
             By.CSS_SELECTOR, 
             "ul[class*='list-style-none']"
         )
         
-        random_delay(2, 3)
+        Utils.random_delay(2, 3)
         
-        # Inicjalizacja pliku CSV jeśli jeszcze nie istnieje
-        if not self.csv_initialized:
-            self.init_csv_file()
+        # Initialize JSON file if not exists
+        if not self.json_initialized:
+            self.init_json_file()
         
-        # Znajdź wszystkie elementy profili na stronie - używamy wielu selektorów
-        profile_selectors = [
-            "li.GRAOxLqrJyBKXYoRPUQntEwHpJjCqc",
-            "li.reusable-search__result-container",
-            "li.search-result"
+        # Find all profile elements on page
+        profile_strategies = [
+            ("Discovered selector", By.CSS_SELECTOR, self.discovered_profile_selector),
+            ("Li elements with profile links", By.XPATH, "//li[.//a[contains(@href, '/in/')]]"),
+            ("Li elements containing keywords", By.XPATH, "//li[contains(., 'Security') or contains(., 'Engineer') or contains(., 'Architect')]"),
+            ("Li elements as ul children", By.CSS_SELECTOR, "ul[class*='list-style-none'] > li"),
+            ("Div elements with profile links", By.XPATH, "//div[.//a[contains(@href, '/in/')]]")
         ]
         
+        # Find profile elements using different strategies
+        profile_elements = self.find_elements_with_retry(profile_strategies)
+        
+        if not profile_elements or len(profile_elements) == 0:
+            self.logger.error("No profile elements found on page")
+            return []
+        
+        self.logger.info(f"Found {len(profile_elements)} potential profile elements")
+        
+        # Display full text of first element for analysis
+        if profile_elements and len(profile_elements) > 0:
+            self.logger.info(f"First profile element text: {profile_elements[0].text}")
+        
         profiles_found = []
-        profile_elements = []
         
-        for selector in profile_selectors:
+        for i, profile_element in enumerate(profile_elements):
             try:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    profile_elements = elements
-                    break
-            except:
-                continue
-        
-        for profile_element in profile_elements:
-            try:
-                # Sprawdź, czy element to faktycznie profil osoby (a nie reklama lub inny element)
-                if "Reaktywuj Premium" in profile_element.text or "Premium" in profile_element.text:
+                # Check if element is actually a person profile (not an ad or other element)
+                element_text = profile_element.text.lower()
+                
+                # Skip elements that are ads or other elements, not profiles
+                if any(keyword in element_text for keyword in ["premium", "reaktywuj", "reactivate", "anuluj w dowolnym momencie"]):
+                    self.logger.debug(f"Skipping element {i+1}, probably an ad")
+                    continue
+                
+                # Check presence of profile link - most reliable verification method
+                try:
+                    profile_link = profile_element.find_element(By.XPATH, ".//a[contains(@href, '/in/')]")
+                    if not profile_link:
+                        self.logger.debug(f"Skipping element {i+1}, no profile link")
+                        continue
+                except Exception:
+                    self.logger.debug(f"Skipping element {i+1}, couldn't find profile link")
                     continue
                     
-                # Ekstrahuj dane profilu
+                # Extract profile data
                 profile_data = self.extract_profile_data(profile_element)
                 
-                # Dodaj tylko jeśli udało się pobrać przynajmniej imię i nazwisko
-                if profile_data["name"]:  
+                # Add only if name and profile link were extracted
+                if profile_data["name"] or profile_data["profile_url"]:  
                     profiles_found.append(profile_data)
-                    # Natychmiast zapisz do CSV
-                    self.append_profile_to_csv(profile_data)
-                    print(f"[INFO] Znaleziono profil: {profile_data['name']} - {profile_data['title']}")
+                    # Immediately save to JSON
+                    self.append_profile_to_json(profile_data)
+                    self.logger.info(f"Found profile: {profile_data['name']} - {profile_data['title']}")
+                    
+                    # Add random page scrolling for better human simulation
+                    if random.random() < 0.3:  # 30% chance to scroll after each profile
+                        Utils.random_scroll(self.driver)
+                else:
+                    self.logger.debug(f"Skipping element {i+1}, couldn't extract basic profile data")
+                        
             except StaleElementReferenceException:
-                print("[WARN] Element stracił ważność, pomijam")
+                self.logger.warning(f"Element {i+1} became stale, skipping")
                 continue
             except Exception as e:
-                print(f"[WARN] Błąd podczas przetwarzania profilu: {e}")
+                self.logger.warning(f"Error processing profile {i+1}: {e}")
+                import traceback
+                self.logger.debug(traceback.format_exc())
                 
+        self.logger.info(f"Found {len(profiles_found)} profiles on page")
         return profiles_found
 
     def navigate_to_next_page(self):
-        """Nawiguje do następnej strony wyników, jeśli jest dostępna."""
+        """Navigates to next page of results, if available."""
         try:
-            # Najpierw poczekaj na załadowanie paginacji
-            pagination = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "artdeco-pagination"))
-            )
+            # First wait for pagination to load - use different selectors
+            pagination_selectors = [
+                ".artdeco-pagination",
+                "div.artdeco-pagination",
+                "//div[contains(@class, 'artdeco-pagination')]",
+                "//div[contains(@class, 'pagination')]"
+            ]
             
-            # Scrolluj do paginacji
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", pagination)
-            random_delay(1, 2)
-            
-            # Znajdź przycisk "Dalej" - kilka metod
-            try:
-                # Metoda 1: Po tekście "Dalej"
-                next_button = self.driver.find_element(By.XPATH, 
-                    "//button[contains(@class, 'artdeco-pagination__button--next')]")
-                
-                # Sprawdź czy przycisk nie jest wyłączony
-                if "artdeco-button--disabled" in next_button.get_attribute("class"):
-                    print("[INFO] Przycisk 'Dalej' jest wyłączony - osiągnięto ostatnią stronę")
-                    return False
+            pagination = None
+            for selector in pagination_selectors:
+                try:
+                    if selector.startswith("//"):
+                        pagination = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
+                    else:
+                        pagination = WebDriverWait(self.driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
                     
-                print("[INFO] Przechodzenie do następnej strony...")
-                # Najpierw scrolluj do przycisku
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
-                random_delay(1, 2)
+                    if pagination:
+                        break
+                except TimeoutException:
+                    continue
+            
+            if not pagination:
+                self.logger.warning("Pagination not found on page")
+                return False
+            
+            # Scroll to pagination
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", pagination)
+            Utils.random_delay(1, 2)
+            
+            # Find "Next" button using different selectors
+            next_button_strategies = [
+                ("artdeco-pagination__button--next class", By.XPATH, "//button[contains(@class, 'artdeco-pagination__button--next')]"),
+                ("Aria-label containing 'Next'", By.XPATH, "//button[contains(@aria-label, 'Next') or contains(@aria-label, 'Dalej')]"),
+                ("Button with right arrow icon", By.XPATH, "//button[.//li-icon[@type='chevron-right']]"),
+                ("CSS selector for Next button", By.CSS_SELECTOR, "button.artdeco-pagination__button--next"),
+                ("'Next' text in button", By.XPATH, "//button[contains(text(), 'Dalej') or contains(text(), 'Next')]"),
+                ("Last pagination button", By.XPATH, "//div[contains(@class, 'artdeco-pagination')]//button[last()]")
+            ]
+            
+            next_button = None
+            for strategy_name, by_method, selector in next_button_strategies:
+                try:
+                    elements = self.driver.find_elements(by_method, selector)
+                    if elements:
+                        next_button = elements[0]
+                        self.logger.info(f"Found 'Next' button using strategy: {strategy_name}")
+                        break
+                except Exception:
+                    continue
+            
+            if not next_button:
+                self.logger.info("'Next' button not found - reached last page")
+                return False
+            
+            # Check if button is disabled
+            button_classes = next_button.get_attribute("class") or ""
+            button_disabled = next_button.get_attribute("disabled")
+            
+            if "disabled" in button_classes or "artdeco-button--disabled" in button_classes or button_disabled:
+                self.logger.info("'Next' button is disabled - reached last page")
+                return False
                 
-                # Kliknij za pomocą JavaScriptu (bardziej niezawodne)
-                self.driver.execute_script("arguments[0].click();", next_button)
-                
-                # Czekaj na odświeżenie strony
+            self.logger.info("Moving to next page...")
+            # First scroll to button
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+            Utils.random_delay(1, 2)
+            
+            # Save URL before clicking
+            current_url = self.driver.current_url
+            
+            # Click using JavaScript (more reliable)
+            self.driver.execute_script("arguments[0].click();", next_button)
+            
+            # Wait for page refresh
+            try:
                 WebDriverWait(self.driver, 10).until(
                     EC.staleness_of(pagination)
                 )
-                
-                # Czekaj na ponowne załadowanie wyników
+            except TimeoutException:
+                # If page change not detected, check if URL changed
+                new_url = self.driver.current_url
+                if new_url != current_url:
+                    self.logger.info("Navigation to next page confirmed by URL change")
+                else:
+                    self.logger.warning("Page change not detected, checking other indicators")
+                    
+                    # Check if page parameter in URL changed
+                    if "page=" in new_url:
+                        current_page_match = re.search(r'page=(\d+)', current_url)
+                        new_page_match = re.search(r'page=(\d+)', new_url)
+                        
+                        if current_page_match and new_page_match:
+                            current_page = int(current_page_match.group(1))
+                            new_page = int(new_page_match.group(1))
+                            
+                            if new_page > current_page:
+                                self.logger.info(f"Navigation from page {current_page} to {new_page}")
+                            else:
+                                self.logger.warning(f"Attempt to go to page {new_page}, but already on page {current_page}")
+                    else:
+                        self.logger.warning("Could not confirm navigation to next page")
+            
+            # Wait for results to reload
+            try:
                 WebDriverWait(self.driver, 15).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "ul[class*='list-style-none']"))
                 )
-                
-                random_delay(3, 5)
-                return True
-                
-            except NoSuchElementException:
-                print("[INFO] Nie znaleziono przycisku 'Dalej' - osiągnięto ostatnią stronę")
-                return False
+            except TimeoutException:
+                self.logger.warning("Results list not detected on new page")
+            
+            # Add random delay with random scrolling for better simulation
+            Utils.random_delay(3, 5)
+            Utils.random_scroll(self.driver)
+            return True
                 
         except Exception as e:
-            print(f"[ERROR] Problem z przejściem do następnej strony: {str(e)}")
-            # Dodaj ponowną próbę z inną metodą
+            self.logger.error(f"Problem navigating to next page: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            # Add retry with different method
             try:
-                # Spróbuj innego selektora
-                next_button = self.driver.find_element(By.CSS_SELECTOR, 
-                    "button.artdeco-pagination__button--next")
-                self.driver.execute_script("arguments[0].click();", next_button)
-                random_delay(3, 5)
-                return True
-            except:
+                # Try navigation directly via URL
+                current_url = self.driver.current_url
+                if "page=" in current_url:
+                    # Increase page number in URL
+                    current_page = re.search(r'page=(\d+)', current_url)
+                    if current_page:
+                        next_page = int(current_page.group(1)) + 1
+                        next_url = re.sub(r'page=\d+', f'page={next_page}', current_url)
+                        self.logger.info(f"Attempting direct navigation to URL: {next_url}")
+                        self.driver.get(next_url)
+                        Utils.random_delay(3, 5)
+                        return True
+                else:
+                    # Add page=2 parameter to URL
+                    separator = "&" if "?" in current_url else "?"
+                    next_url = f"{current_url}{separator}page=2"
+                    self.logger.info(f"Attempting direct navigation to URL: {next_url}")
+                    self.driver.get(next_url)
+                    Utils.random_delay(3, 5)
+                    return True
+            except Exception as e2:
+                self.logger.error(f"Alternative navigation method also failed: {e2}")
                 return False
 
     def get_total_pages(self):
-        """Próbuje odczytać całkowitą liczbę stron wyników"""
+        """Tries to read total number of result pages"""
         try:
-            pagination_text = self.driver.find_element(
-                By.CSS_SELECTOR, 
-                "div.artdeco-pagination__page-state"
-            ).text
+            # First try to find number of results information
+            total_results_selectors = [
+                "//h2[contains(@class, 't-14') and contains(text(), 'wyników')]",
+                "//div[contains(text(), 'Około') and contains(text(), 'wyników')]",
+                "//div[contains(text(), 'About') and contains(text(), 'results')]",
+                "//span[contains(text(), 'wyników')]",
+                "//div[contains(@class, 't-14')][contains(text(), 'wyników')]"
+            ]
             
-            # Format tekstu: "Strona X z Y"
-            parts = pagination_text.split(" ")
-            if len(parts) >= 4:
-                return int(parts[3])
-            return 100  # Domyślnie załóż dużą liczbę stron
-        except Exception:
-            return 100  # Wartość domyślna, jeśli nie można odczytać
+            total_results_text = None
+            for selector in total_results_selectors:
+                try:
+                    element = self.driver.find_element(By.XPATH, selector)
+                    if element:
+                        total_results_text = element.text
+                        break
+                except Exception:
+                    continue
+            
+            if total_results_text:
+                # Extract number of results
+                match = re.search(r'(\d+[\s,.]*\d*)\s+wyników', total_results_text)
+                if not match:
+                    match = re.search(r'About\s+(\d+[\s,.]*\d*)\s+results', total_results_text)
+                
+                if match:
+                    # Remove non-digit characters
+                    results_count_str = re.sub(r'[^\d]', '', match.group(1))
+                    try:
+                        total_results = int(results_count_str)
+                        # Assume 10 results per page
+                        return max(1, int(total_results / 10) + (1 if total_results % 10 > 0 else 0))
+                    except ValueError:
+                        pass
+            
+            # Try different selectors for pagination state
+            pagination_state_selectors = [
+                "div.artdeco-pagination__page-state",
+                "//div[contains(@class, 'pagination') and contains(@class, 'page-state')]",
+                "//span[contains(text(), 'Strona') or contains(text(), 'Page')]",
+                "//div[contains(@class, 'pagination')]//span[contains(text(), 'z') or contains(text(), 'of')]"
+            ]
+            
+            for selector in pagination_state_selectors:
+                try:
+                    if selector.startswith("//"):
+                        pagination_text = self.driver.find_element(By.XPATH, selector).text
+                    else:
+                        pagination_text = self.driver.find_element(By.CSS_SELECTOR, selector).text
+                    
+                    # Search for patterns like "Page X of Y" or "Strona X z Y"
+                    match = re.search(r'(?:[Ss]trona|[Pp]age)\s+\d+\s+(?:z|of)\s+(\d+)', pagination_text)
+                    if match:
+                        return int(match.group(1))
+                    
+                    # Check other possible formats
+                    if "z" in pagination_text:
+                        parts = pagination_text.split("z")
+                        if len(parts) >= 2:
+                            try:
+                                return int(parts[1].strip())
+                            except ValueError:
+                                pass
+                    
+                    if "of" in pagination_text:
+                        parts = pagination_text.split("of")
+                        if len(parts) >= 2:
+                            try:
+                                return int(parts[1].strip())
+                            except ValueError:
+                                pass
+                except Exception:
+                    continue
+            
+            # If reading failed, check number of pagination buttons
+            pagination_buttons = self.driver.find_elements(By.CSS_SELECTOR, "button[data-test-pagination-page-btn]")
+            if pagination_buttons:
+                # Get last visible page number
+                last_page_button = pagination_buttons[-1]
+                try:
+                    return int(last_page_button.text.strip())
+                except ValueError:
+                    pass
+            
+            # Default value if can't read
+            return 100
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to read number of pages: {e}")
+            return 100  # Default value if can't read
             
     def search_and_collect_profiles(self):
-        """Wyszukuje profile i zbiera dane z wszystkich dostępnych stron"""
+        """Searches for profiles and collects data from all available pages"""
         if not self.search_people(self.search_query):
-            print("[ERROR] Nie udało się wyszukać osób")
+            self.logger.error("Failed to search for people")
             return []
             
         all_profiles = []
         current_page = 1
         total_pages = self.get_total_pages()
+        max_pages = min(total_pages, 100)  # Page limit for safety
         
-        print(f"[INFO] Znaleziono łącznie {total_pages} stron wyników")
+        self.logger.info(f"Found a total of {total_pages} result pages (processing max {max_pages})")
         
-        while True:
-            print(f"[INFO] Przetwarzanie strony {current_page} z {total_pages}")
+        while current_page <= max_pages:
+            self.logger.info(f"Processing page {current_page} of {total_pages}")
             
-            # Pobierz profile z bieżącej strony
+            # Add random delay before processing each page
+            Utils.random_delay(1, 3)
+            
+            # Get profiles from current page
             page_profiles = self.process_search_results_page()
             all_profiles.extend(page_profiles)
             
-            print(f"[INFO] Znaleziono {len(page_profiles)} profili na stronie {current_page}")
+            self.logger.info(f"Found {len(page_profiles)} profiles on page {current_page}")
             
-            # Przejdź do następnej strony
-            if not self.navigate_to_next_page():
+            # If no profiles found on page, try again with delay
+            if len(page_profiles) == 0:
+                self.logger.warning(f"No profiles found on page {current_page}, refreshing and retrying")
+                self.driver.refresh()
+                Utils.random_delay(5, 8)
+                
+                # Try again
+                page_profiles = self.process_search_results_page()
+                all_profiles.extend(page_profiles)
+                
+                # If still no results, break loop
+                if len(page_profiles) == 0:
+                    self.logger.error("Still no profiles after retry, ending processing")
+                    break
+            
+            # Go to next page
+            if current_page < max_pages:
+                if not self.navigate_to_next_page():
+                    self.logger.info("Can't go to next page - end of processing")
+                    break
+                
+                current_page += 1
+                
+                # Add random delay between pages
+                Utils.random_delay(3, 7)
+            else:
                 break
                 
-            current_page += 1
-            
-            # Dodaj losowe opóźnienie między stronami
-            random_delay(3, 7)
-                
-        print(f"[INFO] Zebrano dane {len(all_profiles)} profili z {current_page} stron")
-        print(f"[INFO] Wszystkie dane zostały zapisane do pliku {self.csv_filename}")
+        self.logger.info(f"Collected data for {len(all_profiles)} profiles from {current_page} pages")
+        self.logger.info(f"All data saved to file {self.json_filename}")
         return all_profiles
 
+    def search_people(self, search_query):
+        """Performs people search on LinkedIn"""
+        self.logger.info(f"Searching for people with query: '{search_query}'")
+        
+        # Go to LinkedIn home page
+        self.driver.get("https://www.linkedin.com/")
+        Utils.random_delay(2, 4)
+        
+        # Find search field - try multiple selectors
+        search_input_selectors = [
+            "input.search-global-typeahead__input",
+            "input[placeholder*='Szukaj']",
+            "input[placeholder*='Search']",
+            "input[role='combobox']",
+            "//input[contains(@class, 'search')]",
+            "//input[contains(@placeholder, 'Szukaj') or contains(@placeholder, 'Search')]"
+        ]
+        
+        search_input = None
+        for selector in search_input_selectors:
+            try:
+                if selector.startswith("//"):
+                    search_input = Utils.wait_and_find_element(self.driver, By.XPATH, selector, timeout=5)
+                else:
+                    search_input = Utils.wait_and_find_element(self.driver, By.CSS_SELECTOR, selector, timeout=5)
+                
+                if search_input:
+                    break
+            except Exception:
+                continue
+        
+        if not search_input:
+            self.logger.error("Search field not found")
+            return False
+        
+        # Clear field and type query in human-like way
+        search_input.clear()
+        
+        # Type one character at a time with random delays
+        for char in search_query:
+            search_input.send_keys(char)
+            time.sleep(random.uniform(0.05, 0.2))
+            
+        Utils.random_delay(0.5, 1.5)
+        search_input.send_keys(Keys.ENTER)
+        Utils.random_delay(2, 4)
+        
+        # Add random page scrolling
+        Utils.random_scroll(self.driver)
+        
+        # Try to navigate to people search results
+        try:
+            # Navigate to people search results (if not already there)
+            people_results_selectors = [
+                "//a[contains(text(), 'Zobacz wszystkie wyniki osób')]",
+                "//a[contains(text(), 'See all people results')]",
+                "//a[contains(text(), 'wszystkie wyniki') and contains(text(), 'osób')]",
+                "//a[contains(@href, '/search/results/people')]",
+                "//button[contains(text(), 'Osoby')]",
+                "//button[contains(text(), 'People')]"
+            ]
+            
+            found_link = False
+            for selector in people_results_selectors:
+                try:
+                    people_link = WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    self.driver.execute_script("arguments[0].click();", people_link)
+                    Utils.random_delay(2, 4)
+                    found_link = True
+                    break
+                except Exception:
+                    continue
+                    
+            if not found_link:
+                # Check if already on people results page
+                if "search/results/people" not in self.driver.current_url:
+                    self.logger.warning("Link to people results not found")
+        except Exception as e:
+            self.logger.warning(f"Error navigating to people results: {e}")
+        
+        # Check URL to confirm
+        is_people_results = "search/results/people" in self.driver.current_url
+        
+        if is_people_results:
+            self.logger.info("Successfully navigated to people search results")
+            
+            # Detect selectors on current page
+            self.discover_selectors()
+        else:
+            self.logger.error("Failed to navigate to people search results")
+            
+        return is_people_results
 
-class LinkedInProfileParser:
+
+# Command Pattern implementation
+class Command(ABC):
+    """Abstract command interface"""
+    @abstractmethod
+    def execute(self):
+        pass
+
+class DeleteCommentsCommand(Command):
     def __init__(self, driver):
         self.driver = driver
+        self.logger = LoggerSetup.get_logger("DeleteCommentsCommand")
         
-    def get_text_safely(self, element, selector, method=By.CSS_SELECTOR):
-        """Bezpieczne pobieranie tekstu z elementu"""
-        try:
-            found = element.find_element(method, selector)
-            if found:
-                return found.text.strip()
-        except:
-            pass
-        return ""
-        
-    def try_multiple_selectors(self, element, selectors, method=By.CSS_SELECTOR):
-        """Próbuje wielu selektorów, zwraca pierwszy znaleziony element"""
-        for selector in selectors:
-            try:
-                found = element.find_element(method, selector)
-                if found:
-                    return found
-            except:
-                continue
-        return None
-        
-    def scroll_to_element(self, element):
-        """Przewija do elementu, aby załadować dynamiczną zawartość"""
-        try:
-            self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
-            random_delay(1, 2)
-        except:
-            pass
-            
-    def expand_section(self, section_name):
-        """Rozwija sekcję, jeśli jest zwinięta"""
-        try:
-            # Szukaj przycisku "Pokaż więcej" w sekcji
-            show_more_buttons = self.driver.find_elements(
-                By.XPATH, 
-                f"//section[contains(@id, '{section_name}')]//button[contains(text(), 'Pokaż więcej') or contains(text(), 'See more') or contains(@class, 'inline-show-more-text__button')]"
-            )
-            
-            for btn in show_more_buttons:
-                try:
-                    self.scroll_to_element(btn)
-                    self.driver.execute_script("arguments[0].click();", btn)
-                    random_delay(0.5, 1.5)
-                except:
-                    pass
-        except Exception as e:
-            print(f"[WARN] Nie udało się rozwinąć sekcji {section_name}: {e}")
-            
-    def load_full_page(self):
-        """Ładuje całą stronę profilu, przewijając do końca"""
-        # Przewijaj do dołu w odstępach, aby załadować dynamiczną zawartość
-        last_height = self.driver.execute_script("return document.body.scrollHeight")
-        
-        while True:
-            # Przewiń w dół
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            random_delay(1.5, 2.5)
-            
-            # Poczekaj na załadowanie treści
-            random_delay(1, 2)
-            
-            # Oblicz nową wysokość i sprawdź, czy osiągnięto dół strony
-            new_height = self.driver.execute_script("return document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-            
-        # Przewiń z powrotem na górę
-        self.driver.execute_script("window.scrollTo(0, 0);")
-        random_delay(1, 2)
-        
-    def expand_all_sections(self):
-        """Rozszerza wszystkie sekcje profilu"""
-        # Lista możliwych sekcji
-        sections = ["about", "experience", "education", "skills", "languages", "courses", "projects"]
-        
-        # Rozwiń każdą sekcję
-        for section in sections:
-            self.expand_section(section)
-            
-        # Szukaj wszystkich przycisków "Pokaż więcej" / "See more" na stronie
-        show_more_buttons = self.driver.find_elements(
-            By.XPATH, 
-            "//button[contains(text(), 'Zobacz więcej') or contains(text(), 'See more') or contains(text(), 'Pokaż więcej') or contains(@class, 'inline-show-more-text__button')]"
-        )
-        
-        for btn in show_more_buttons:
-            try:
-                self.scroll_to_element(btn)
-                self.driver.execute_script("arguments[0].click();", btn)
-                random_delay(0.5, 1)
-            except:
-                pass
-        
-    def extract_basic_info(self):
-        """Ekstrahuje podstawowe informacje o profilu"""
-        basic_info = {
-            "name": "",
-            "headline": "",
-            "location": "",
-            "followers": "",
-            "connections": ""
-        }
-        
-        # Imię i nazwisko
-        name_selectors = [
-            "h1.text-heading-xlarge", 
-            "h1.inline", 
-            "h1.pv-top-card--list"
-        ]
-        
-        for selector in name_selectors:
-            try:
-                name_element = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if name_element:
-                    basic_info["name"] = name_element.text.strip()
-                    break
-            except:
-                pass
-                
-        # Nagłówek/stanowisko
-        headline_selectors = [
-            "div.text-body-medium.break-words", 
-            ".pv-top-card--list-bullet"
-        ]
-        
-        for selector in headline_selectors:
-            try:
-                headline_element = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if headline_element:
-                    basic_info["headline"] = headline_element.text.strip()
-                    break
-            except:
-                pass
-                
-        # Lokalizacja
-        location_selectors = [
-            "span.text-body-small.inline", 
-            ".pv-top-card--list-bullet"
-        ]
-        
-        for selector in location_selectors:
-            try:
-                location_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if location_elements and len(location_elements) > 0:
-                    # Często lokalizacja jest drugim elementem w tym formacie
-                    if len(location_elements) >= 2:
-                        basic_info["location"] = location_elements[1].text.strip()
-                    else:
-                        basic_info["location"] = location_elements[0].text.strip()
-                    break
-            except:
-                pass
-                
-        # Obserwujący
-        try:
-            followers_element = self.driver.find_element(
-                By.XPATH, 
-                "//span[contains(text(), 'obserwujących') or contains(text(), 'followers')]"
-            )
-            if followers_element:
-                followers_text = followers_element.text.strip()
-                # Wyodrębnij liczbę z tekstu
-                basic_info["followers"] = re.search(r'\d+(?:,\d+)*', followers_text).group(0)
-        except:
-            pass
-            
-        # Liczba kontaktów
-        try:
-            connections_element = self.driver.find_element(
-                By.XPATH, 
-                "//span[contains(text(), 'kontakt') or contains(text(), 'connection')]"
-            )
-            if connections_element:
-                connections_text = connections_element.text.strip()
-                # Wyodrębnij liczbę z tekstu
-                matches = re.search(r'(\d+(?:\+|\s*\+)?)', connections_text)
-                if matches:
-                    basic_info["connections"] = matches.group(1)
-        except:
-            pass
-            
-        return basic_info
-        
-    def extract_about_section(self):
-        """Ekstrahuje sekcję 'O mnie'"""
-        about_text = ""
-        
-        # Znajdź sekcję "O mnie"
-        about_selectors = [
-            "section#about div.display-flex.ph5.pv3", 
-            "section[id='about'] .pv-profile-section__section-info",
-            "section[id='about'] .inline-show-more-text"
-        ]
-        
-        for selector in about_selectors:
-            try:
-                about_element = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if about_element:
-                    self.scroll_to_element(about_element)
-                    about_text = about_element.text.strip()
-                    break
-            except:
-                pass
-                
-        # Jeśli nie udało się znaleźć tekstu, spróbuj innej metody
-        if not about_text:
-            try:
-                about_section = self.driver.find_element(By.ID, "about")
-                if about_section:
-                    self.scroll_to_element(about_section)
-                    # Spróbuj znaleźć paragraf lub div z tekstem
-                    text_elements = about_section.find_elements(
-                        By.XPATH, 
-                        ".//div[contains(@class, 'text') or contains(@class, 'display-flex')]"
-                    )
-                    
-                    for elem in text_elements:
-                        text = elem.text.strip()
-                        if text and len(text) > 50:  # Zakładamy, że sekcja "O mnie" ma co najmniej 50 znaków
-                            about_text = text
-                            break
-            except:
-                pass
-                
-        return about_text
-        
-    def extract_experience(self):
-        """Ekstrahuje doświadczenie zawodowe"""
-        experience_items = []
-        
-        # Znajdź sekcję doświadczenia
-        experience_section = None
-        experience_selectors = [
-            "section#experience", 
-            "section[id='experience']"
-        ]
-        
-        for selector in experience_selectors:
-            try:
-                experience_section = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if experience_section:
-                    self.scroll_to_element(experience_section)
-                    break
-            except:
-                pass
-                
-        if not experience_section:
-            return experience_items
-        
-        # Rozwiń wszystkie przyciski "więcej" w sekcji
-        show_more_buttons = experience_section.find_elements(
-            By.XPATH, 
-            ".//button[contains(text(), 'Pokaż więcej') or contains(text(), 'Zobacz więcej') or contains(text(), 'See more')]"
-        )
-        
-        for btn in show_more_buttons:
-            try:
-                self.scroll_to_element(btn)
-                self.driver.execute_script("arguments[0].click();", btn)
-                random_delay(0.5, 1)
-            except:
-                pass
-                
-        # Szukaj elementów doświadczenia w różnych formatach
-        experience_elements = []
-        
-        # Wariant 1: Standardowy format
-        try:
-            elements = experience_section.find_elements(By.CSS_SELECTOR, "li.artdeco-list__item")
-            if elements:
-                experience_elements = elements
-        except:
-            pass
-            
-        # Wariant 2: Alternatywny format
-        if not experience_elements:
-            try:
-                elements = experience_section.find_elements(By.XPATH, ".//div[contains(@class, 'pvs-entity')]")
-                if elements:
-                    experience_elements = elements
-            except:
-                pass
-                
-        # Iteruj przez elementy doświadczenia
-        for exp_element in experience_elements:
-            try:
-                experience_item = {}
-                
-                # Nazwa firmy
-                company_elements = exp_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 'hoverable-link-text') or contains(@class, 't-bold')]"
-                )
-                
-                if company_elements and len(company_elements) > 0:
-                    experience_item["company"] = company_elements[0].text.strip()
-                
-                # Stanowisko
-                title_elements = exp_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 't-14') and contains(@class, 't-bold')]"
-                )
-                
-                if title_elements and len(title_elements) > 0:
-                    # W niektórych formatach tytuł jest w pierwszym elemencie
-                    experience_item["title"] = title_elements[0].text.strip()
-                    
-                # Daty
-                date_elements = exp_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 't-14') and contains(@class, 't-normal') and contains(@class, 't-black--light')]"
-                )
-                
-                if date_elements and len(date_elements) > 0:
-                    for date_elem in date_elements:
-                        if "20" in date_elem.text or "19" in date_elem.text:  # Prawdopodobnie zawiera rok
-                            experience_item["date_range"] = date_elem.text.strip()
-                            break
-                
-                # Lokalizacja
-                location_elements = exp_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 't-14') and contains(@class, 't-normal') and contains(@class, 't-black--light')]"
-                )
-                
-                if location_elements and len(location_elements) > 1:
-                    # Zakładamy, że lokalizacja jest w kolejnym elemencie po datach
-                    experience_item["location"] = location_elements[1].text.strip()
-                
-                # Opis
-                description_elements = exp_element.find_elements(
-                    By.XPATH, 
-                    ".//div[contains(@class, 'inline-show-more-text')]"
-                )
-                
-                if description_elements and len(description_elements) > 0:
-                    experience_item["description"] = description_elements[0].text.strip()
-                
-                # Dodaj do listy, jeśli udało się znaleźć co najmniej firmę lub stanowisko
-                if "company" in experience_item or "title" in experience_item:
-                    experience_items.append(experience_item)
-                    
-            except Exception as e:
-                print(f"[WARN] Błąd podczas ekstrahowania doświadczenia: {e}")
-                
-        return experience_items
-        
-    def extract_education(self):
-        """Ekstrahuje wykształcenie"""
-        education_items = []
-        
-        # Znajdź sekcję wykształcenia
-        education_section = None
-        education_selectors = [
-            "section#education", 
-            "section[id='education']"
-        ]
-        
-        for selector in education_selectors:
-            try:
-                education_section = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if education_section:
-                    self.scroll_to_element(education_section)
-                    break
-            except:
-                pass
-                
-        if not education_section:
-            return education_items
-            
-        # Znajdź wszystkie elementy wykształcenia
-        education_elements = []
-        
-        try:
-            elements = education_section.find_elements(By.CSS_SELECTOR, "li.artdeco-list__item")
-            if elements:
-                education_elements = elements
-        except:
-            pass
-            
-        if not education_elements:
-            try:
-                elements = education_section.find_elements(By.XPATH, ".//div[contains(@class, 'pvs-entity')]")
-                if elements:
-                    education_elements = elements
-            except:
-                pass
-                
-        # Przetwórz każdy element wykształcenia
-        for edu_element in education_elements:
-            try:
-                education_item = {}
-                
-                # Nazwa uczelni
-                school_elements = edu_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 'hoverable-link-text') or contains(@class, 't-bold')]"
-                )
-                
-                if school_elements and len(school_elements) > 0:
-                    education_item["school"] = school_elements[0].text.strip()
-                
-                # Stopień/kierunek
-                degree_elements = edu_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 't-14') and contains(@class, 't-normal')]"
-                )
-                
-                if degree_elements and len(degree_elements) > 0:
-                    education_item["degree"] = degree_elements[0].text.strip()
-                
-                # Daty
-                date_elements = edu_element.find_elements(
-                    By.XPATH, 
-                    ".//span[contains(@class, 't-14') and contains(@class, 't-normal') and contains(@class, 't-black--light')]"
-                )
-                
-                if date_elements and len(date_elements) > 0:
-                    for date_elem in date_elements:
-                        if "20" in date_elem.text or "19" in date_elem.text:  # Prawdopodobnie zawiera rok
-                            education_item["date_range"] = date_elem.text.strip()
-                            break
-                
-                # Dodaj do listy, jeśli udało się znaleźć co najmniej szkołę
-                if "school" in education_item:
-                    education_items.append(education_item)
-                    
-            except Exception as e:
-                print(f"[WARN] Błąd podczas ekstrahowania wykształcenia: {e}")
-                
-        return education_items
-        
-    def extract_skills(self):
-        """Ekstrahuje umiejętności"""
-        skills = []
-        
-        # Znajdź sekcję umiejętności
-        skills_section = None
-        skills_selectors = [
-            "section#skills", 
-            "section[id='skills']"
-        ]
-        
-        for selector in skills_selectors:
-            try:
-                skills_section = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if skills_section:
-                    self.scroll_to_element(skills_section)
-                    break
-            except:
-                pass
-                
-        if not skills_section:
-            return skills
-            
-        # Znajdź przyciski "Pokaż wszystkie umiejętności"
-        show_all_buttons = skills_section.find_elements(
-            By.XPATH, 
-            ".//a[contains(text(), 'Pokaż wszystkie') or contains(text(), 'Show all')]"
-        )
-        
-        for btn in show_all_buttons:
-            try:
-                self.scroll_to_element(btn)
-                self.driver.execute_script("arguments[0].click();", btn)
-                random_delay(1.5, 2.5)
-                
-                # Po kliknięciu powinno otworzyć się okno modalne z pełną listą umiejętności
-                modal_skills = self.driver.find_elements(
-                    By.XPATH, 
-                    "//div[contains(@class, 'artdeco-modal__content')]//span[contains(@class, 't-bold')]"
-                )
-                
-                for skill in modal_skills:
-                    skill_text = skill.text.strip()
-                    if skill_text and skill_text not in skills:
-                        skills.append(skill_text)
-                        
-                # Zamknij modal
-                close_button = self.driver.find_element(
-                    By.XPATH, 
-                    "//button[contains(@class, 'artdeco-modal__dismiss')]"
-                )
-                
-                if close_button:
-                    self.driver.execute_script("arguments[0].click();", close_button)
-                    random_delay(1, 2)
-                    
-                return skills
-            except Exception as e:
-                print(f"[WARN] Błąd podczas otwierania wszystkich umiejętności: {e}")
-        
-        # Jeśli nie udało się otworzyć modalnego okna, spróbuj pobrać umiejętności bezpośrednio z profilu
-        try:
-            skill_elements = skills_section.find_elements(
-                By.XPATH, 
-                ".//span[contains(@class, 't-bold') or contains(@class, 'hoverable-link-text')]"
-            )
-            
-            for skill in skill_elements:
-                skill_text = skill.text.strip()
-                if skill_text and skill_text not in skills:
-                    skills.append(skill_text)
-                    
-        except Exception as e:
-            print(f"[WARN] Błąd podczas ekstrahowania umiejętności z profilu: {e}")
-            
-        return skills
-        
-    def extract_languages(self):
-        """Ekstrahuje języki"""
-        languages = []
-        
-        # Znajdź sekcję języków
-        languages_section = None
-        languages_selectors = [
-            "section#languages", 
-            "section[id='languages']"
-        ]
-        
-        for selector in languages_selectors:
-            try:
-                languages_section = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if languages_section:
-                    self.scroll_to_element(languages_section)
-                    break
-            except:
-                pass
-                
-        if not languages_section:
-            return languages
-            
-        # Pobierz wszystkie języki
-        try:
-            language_elements = languages_section.find_elements(
-                By.XPATH, 
-                ".//li[contains(@class, 'artdeco-list__item')]"
-            )
-            
-            if not language_elements:
-                language_elements = languages_section.find_elements(
-                    By.XPATH, 
-                    ".//div[contains(@class, 'pvs-entity')]"
-                )
-                
-            for lang_element in language_elements:
-                try:
-                    language_info = {}
-                    
-                    # Nazwa języka
-                    name_elements = lang_element.find_elements(
-                        By.XPATH, 
-                        ".//span[contains(@class, 't-bold')]"
-                    )
-                    
-                    if name_elements and len(name_elements) > 0:
-                        language_info["name"] = name_elements[0].text.strip()
-                        
-                    # Poziom znajomości
-                    level_elements = lang_element.find_elements(
-                        By.XPATH, 
-                        ".//span[contains(@class, 't-14') and contains(@class, 't-normal') and contains(@class, 't-black--light')]"
-                    )
-                    
-                    if level_elements and len(level_elements) > 0:
-                        language_info["proficiency"] = level_elements[0].text.strip()
-                        
-                    if "name" in language_info:
-                        languages.append(language_info)
-                        
-                except Exception as e:
-                    print(f"[WARN] Błąd podczas ekstrahowania języka: {e}")
-                    
-        except Exception as e:
-            print(f"[WARN] Błąd podczas ekstrahowania języków: {e}")
-            
-        return languages
-        
-    def extract_certifications(self):
-        """Ekstrahuje certyfikaty"""
-        certifications = []
-        
-        # Znajdź sekcję certyfikatów
-        cert_section = None
-        cert_selectors = [
-            "section#certifications", 
-            "section[id='certifications']",
-            "section#licenses_and_certifications",
-            "section[id='licenses_and_certifications']"
-        ]
-        
-        for selector in cert_selectors:
-            try:
-                cert_section = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if cert_section:
-                    self.scroll_to_element(cert_section)
-                    break
-            except:
-                pass
-                
-        if not cert_section:
-            return certifications
-            
-        # Pobierz wszystkie certyfikaty
-        try:
-            cert_elements = cert_section.find_elements(
-                By.XPATH, 
-                ".//li[contains(@class, 'artdeco-list__item')]"
-            )
-            
-            if not cert_elements:
-                cert_elements = cert_section.find_elements(
-                    By.XPATH, 
-                    ".//div[contains(@class, 'pvs-entity')]"
-                )
-                
-            for cert_element in cert_elements:
-                try:
-                    cert_info = {}
-                    
-                    # Nazwa certyfikatu
-                    name_elements = cert_element.find_elements(
-                        By.XPATH, 
-                        ".//span[contains(@class, 't-bold')]"
-                    )
-                    
-                    if name_elements and len(name_elements) > 0:
-                        cert_info["name"] = name_elements[0].text.strip()
-                        
-                    # Wydawca
-                    issuer_elements = cert_element.find_elements(
-                        By.XPATH, 
-                        ".//span[contains(@class, 't-14') and contains(@class, 't-normal')]"
-                    )
-                    
-                    if issuer_elements and len(issuer_elements) > 0:
-                        cert_info["issuer"] = issuer_elements[0].text.strip()
-                        
-                    # Data wydania
-                    date_elements = cert_element.find_elements(
-                        By.XPATH, 
-                        ".//span[contains(@class, 't-14') and contains(@class, 't-normal') and contains(@class, 't-black--light')]"
-                    )
-                    
-                    if date_elements and len(date_elements) > 0:
-                        for date_elem in date_elements:
-                            if "20" in date_elem.text or "19" in date_elem.text:  # Prawdopodobnie zawiera rok
-                                cert_info["date"] = date_elem.text.strip()
-                                break
-                        
-                    if "name" in cert_info:
-                        certifications.append(cert_info)
-                        
-                except Exception as e:
-                    print(f"[WARN] Błąd podczas ekstrahowania certyfikatu: {e}")
-                    
-        except Exception as e:
-            print(f"[WARN] Błąd podczas ekstrahowania certyfikatów: {e}")
-            
-        return certifications
-        
-    def parse_profile(self, profile_url):
-        """Parsuje profil LinkedIn i zwraca dane w formacie JSON"""
-        print(f"[INFO] Parsowanie profilu: {profile_url}")
-        
-        try:
-            # Przejdź do strony profilu
-            self.driver.get(profile_url)
-            random_delay(3, 5)
-            
-            # Załaduj całą stronę i rozwiń wszystkie sekcje
-            self.load_full_page()
-            self.expand_all_sections()
-            
-            # Zbierz wszystkie dane
-            profile_data = {
-                "profile_url": profile_url,
-                "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "basic_info": self.extract_basic_info(),
-                "about": self.extract_about_section(),
-                "experience": self.extract_experience(),
-                "education": self.extract_education(),
-                "skills": self.extract_skills(),
-                "languages": self.extract_languages(),
-                "certifications": self.extract_certifications()
-            }
-            
-            # Zapisz do pliku JSON
-            filename = f"{profile_url.split('/')[-2]}.json"
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(profile_data, f, ensure_ascii=False, indent=2)
-                
-            print(f"[INFO] Dane profilu zapisane do pliku: {filename}")
-            
-            return profile_data
-            
-        except Exception as e:
-            print(f"[ERROR] Błąd podczas parsowania profilu {profile_url}: {e}")
-            return None
+    def execute(self):
+        self.logger.info("Executing delete comments command")
+        comment_handler = LinkedInCommentHandler(self.driver)
+        comment_handler.find_and_delete_comments()
+        return "Comments deletion completed"
 
+class FindPeopleCommand(Command):
+    def __init__(self, driver, search_query):
+        self.driver = driver
+        self.search_query = search_query
+        self.logger = LoggerSetup.get_logger("FindPeopleCommand")
+        
+    def execute(self):
+        self.logger.info(f"Executing find people command for query: {self.search_query}")
+        people_handler = LinkedInPeopleSearchHandler(self.driver, self.search_query)
+        profiles = people_handler.search_and_collect_profiles()
+        return f"Found {len(profiles)} profiles. Data saved to {people_handler.json_filename}"
 
-class ProfileScraperThread(threading.Thread):
-    def __init__(self, thread_id, profile_queue, driver_factory):
-        threading.Thread.__init__(self)
-        self.thread_id = thread_id
-        self.profile_queue = profile_queue
-        self.driver_factory = driver_factory
+# Command invoker
+class LinkedInCommandInvoker:
+    def __init__(self, driver):
+        self.driver = driver
+        self.logger = LoggerSetup.get_logger("LinkedInCommandInvoker")
         
-    def run(self):
-        print(f"[INFO] Wątek {self.thread_id} rozpoczyna pracę")
-        
-        # Utworzenie nowego drivera dla wątku
-        driver = self.driver_factory.create_chrome_driver()
-        
+    def execute_command(self, command):
+        self.logger.info(f"Invoking command: {command.__class__.__name__}")
         try:
-            # Logowanie - każdy wątek musi zalogować się oddzielnie
-            login_handler = LinkedInLoginHandler(driver)
-            driver.get("https://www.linkedin.com/login")
-            random_delay(2, 4)
-            
-            if not login_handler.login(EMAIL, PASSWORD):
-                print(f"[ERROR] Wątek {self.thread_id} nie mógł się zalogować")
-                return
-                
-            print(f"[INFO] Wątek {self.thread_id} zalogował się")
-            
-            # Inicjalizacja parsera
-            profile_parser = LinkedInProfileParser(driver)
-            
-            # Pobieraj profile z kolejki, dopóki są dostępne
-            while not self.profile_queue.empty():
-                try:
-                    profile_url = self.profile_queue.get(block=False)
-                    print(f"[INFO] Wątek {self.thread_id} przetwarza profil: {profile_url}")
-                    
-                    # Parsuj profil
-                    profile_data = profile_parser.parse_profile(profile_url)
-                    
-                    # Oznacz zadanie jako zakończone
-                    self.profile_queue.task_done()
-                    
-                    # Dodaj losowe opóźnienie między profilami
-                    random_delay(3, 7)
-                    
-                except queue.Empty:
-                    break
-                except Exception as e:
-                    print(f"[ERROR] Wątek {self.thread_id} napotkał błąd: {e}")
-                    self.profile_queue.task_done()
-                    
+            result = command.execute()
+            self.logger.info(f"Command executed successfully: {result}")
+            return result
         except Exception as e:
-            print(f"[ERROR] Wątek {self.thread_id} napotkał błąd: {e}")
-        finally:
-            driver.quit()
-            print(f"[INFO] Wątek {self.thread_id} zakończył pracę")
+            self.logger.error(f"Command execution failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return f"Command execution failed: {str(e)}"
 
 
 def main():
+    logger = LoggerSetup.get_logger("Main")
     driver = None
     try:
-        # Pobierz wybór akcji
-        print("Wybierz akcję:")
-        print("1. Usuwanie komentarzy (delete-comment)")
-        print("2. Wyszukiwanie osób (find-people)")
-        print("3. Parsowanie profili LinkedIn (parse-profiles)")
-        action = input("Wybierz akcję (1/2/3): ").strip()
+        # Get action choice
+        print("Choose action:")
+        print("1. Delete comments")
+        print("2. Find people")
+        action = input("Select action (1/2): ").strip()
         
-        if action == "3" or action.lower() == "parse-profiles":
-            # Parsowanie profili LinkedIn
-            urls_input = input("Podaj URL-e profili LinkedIn oddzielone przecinkami: ").strip()
-            profile_urls = [url.strip() for url in urls_input.split(",")]
-            
-            if not profile_urls:
-                print("[ERROR] Nie podano żadnych URL-i")
-                return
-                
-            # Utwórz kolejkę z URL-ami profili
-            profile_queue = queue.Queue()
-            for url in profile_urls:
-                profile_queue.put(url)
-                
-            # Określ liczbę wątków (można dostosować)
-            num_threads = min(3, len(profile_urls))
-            
-            # Utwórz i uruchom wątki
-            threads = []
-            for i in range(num_threads):
-                thread = ProfileScraperThread(i+1, profile_queue, DriverFactory)
-                threads.append(thread)
-                thread.start()
-                
-            # Czekaj, aż wszystkie wątki zakończą pracę
-            for thread in threads:
-                thread.join()
-                
-            print("[INFO] Zakończono parsowanie profili")
-            return
-            
-        # Dla pozostałych akcji użyj standardowego flow
+        # Create browser driver
         driver = DriverFactory.create_chrome_driver()
+        logger.info("Chrome browser launched")
         
-        # Zaloguj się na LinkedIn
+        # Go to LinkedIn login page
+        driver.get("https://www.linkedin.com/login")
+        Utils.random_delay(2, 4)
+        
+        # Check if page loaded
+        current_url = driver.current_url
+        logger.info(f"Page loaded: {current_url}")
+        
+        # Login to LinkedIn
         login_handler = LinkedInLoginHandler(driver)
-        driver.get(PROFILE_URL)
-        random_delay(1, 3)
         
-        if not login_handler.login(EMAIL, PASSWORD):
-            print("[ERROR] Logowanie nie powiodło się")
+        if not login_handler.login(Config.EMAIL, Config.PASSWORD):
+            logger.error("Login failed")
             return
-            
-        print("[INFO] Zalogowano pomyślnie.")
         
-        # Wykonaj wybraną akcję
+        # Create command invoker
+        invoker = LinkedInCommandInvoker(driver)
+        
+        # Execute selected action using Command pattern
         if action == "1" or action.lower() == "delete-comment":
-            # Usuwanie komentarzy
-            comment_handler = LinkedInCommentHandler(driver)
-            comment_handler.find_and_delete_comments()
+            # Delete comments command
+            command = DeleteCommentsCommand(driver)
+            invoker.execute_command(command)
         elif action == "2" or action.lower() == "find-people":
-            # Wyszukiwanie osób
-            search_query = input("Podaj frazę wyszukiwania (np. 'Security Engineer'): ").strip()
-            
-            # Utwórz handler wyszukiwania z automatycznie generowaną nazwą pliku
-            people_handler = LinkedInPeopleSearchHandler(driver, search_query)
-            profiles = people_handler.search_and_collect_profiles()
-            
-            # Wyświetl podsumowanie
-            if profiles:
-                print(f"\n[INFO] Zapisano {len(profiles)} profili do pliku {people_handler.csv_filename}")
+            # Find people command
+            search_query = input("Enter search phrase (e.g. 'Security Engineer'): ").strip()
+            command = FindPeopleCommand(driver, search_query)
+            invoker.execute_command(command)
         else:
-            print("[ERROR] Nieznana akcja")
+            logger.error("Unknown action")
 
-        input("Naciśnij Enter, aby zamknąć przeglądarkę...")
+        input("Press Enter to close the browser...")
     except Exception as e:
-        print(f"[FATAL] Wystąpił nieoczekiwany błąd: {e}")
+        logger.critical(f"Unexpected error occurred: {e}")
+        import traceback
+        logger.critical(f"Error details:\n{traceback.format_exc()}")
     finally:
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+                logger.info("Browser has been closed")
+            except Exception as qe:
+                logger.error(f"Problem closing browser: {qe}")
 
 
 if __name__ == "__main__":
